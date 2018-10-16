@@ -131,9 +131,7 @@ public class StandardEngine extends ContainerBase implements Engine {
      */
     @Override
     public String getDefaultHost() {
-
-        return (defaultHost);
-
+        return defaultHost;
     }
 
 
@@ -150,6 +148,9 @@ public class StandardEngine extends ContainerBase implements Engine {
             this.defaultHost = null;
         } else {
             this.defaultHost = host.toLowerCase(Locale.ENGLISH);
+        }
+        if (getState().isAvailable()) {
+            service.getMapper().setDefaultHostName(host);
         }
         support.firePropertyChange("defaultHost", oldDefaultHost,
                                    this.defaultHost);
@@ -184,9 +185,7 @@ public class StandardEngine extends ContainerBase implements Engine {
      */
     @Override
     public Service getService() {
-
-        return (this.service);
-
+        return this.service;
     }
 
 
@@ -264,19 +263,6 @@ public class StandardEngine extends ContainerBase implements Engine {
 
 
     /**
-     * Return a String representation of this component.
-     */
-    @Override
-    public String toString() {
-
-        StringBuilder sb = new StringBuilder("StandardEngine[");
-        sb.append(getName());
-        sb.append("]");
-        return (sb.toString());
-
-    }
-
-    /**
      * Override the default implementation. If no access log is defined for the
      * Engine, look for one in the Engine's default host and then the default
      * host's ROOT context. If still none is found, return the default NoOp
@@ -350,11 +336,11 @@ public class StandardEngine extends ContainerBase implements Engine {
     @Override
     public ClassLoader getParentClassLoader() {
         if (parentClassLoader != null)
-            return (parentClassLoader);
+            return parentClassLoader;
         if (service != null) {
-            return (service.getParentClassLoader());
+            return service.getParentClassLoader();
         }
-        return (ClassLoader.getSystemClassLoader());
+        return ClassLoader.getSystemClassLoader();
     }
 
 

@@ -20,9 +20,12 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.management.MBeanNotificationInfo;
+import javax.management.MBeanRegistration;
+import javax.management.MBeanServer;
 import javax.management.Notification;
 import javax.management.NotificationBroadcasterSupport;
 import javax.management.NotificationListener;
+import javax.management.ObjectName;
 
 import org.apache.juli.logging.Log;
 import org.apache.juli.logging.LogFactory;
@@ -31,7 +34,9 @@ import org.apache.tomcat.jdbc.pool.PoolProperties.InterceptorDefinition;
 import org.apache.tomcat.jdbc.pool.PoolUtilities;
 import org.apache.tomcat.jdbc.pool.Validator;
 
-public class ConnectionPool extends NotificationBroadcasterSupport implements ConnectionPoolMBean  {
+public class ConnectionPool extends NotificationBroadcasterSupport
+        implements ConnectionPoolMBean, MBeanRegistration {
+
     /**
      * logger
      */
@@ -52,6 +57,11 @@ public class ConnectionPool extends NotificationBroadcasterSupport implements Co
     protected ConcurrentLinkedQueue<NotificationListener> listeners =
             new ConcurrentLinkedQueue<>();
 
+    /**
+     * the ObjectName of this pool.
+     */
+    private ObjectName oname = null;
+
     public ConnectionPool(org.apache.tomcat.jdbc.pool.ConnectionPool pool) {
         super();
         this.pool = pool;
@@ -65,6 +75,29 @@ public class ConnectionPool extends NotificationBroadcasterSupport implements Co
         return pool.getPoolProperties();
     }
 
+    public ObjectName getObjectName() {
+        return oname;
+    }
+
+    @Override
+    public ObjectName preRegister(MBeanServer server, ObjectName name)
+            throws Exception {
+        this.oname = name;
+        return name;
+    }
+
+    @Override
+    public void postRegister(Boolean registrationDone) {
+    }
+
+    @Override
+    public void preDeregister() throws Exception {
+    }
+
+    @Override
+    public void postDeregister() {
+    }
+
     //=================================================================
     //       NOTIFICATION INFO
     //=================================================================
@@ -73,8 +106,9 @@ public class ConnectionPool extends NotificationBroadcasterSupport implements Co
     public static final String NOTIFY_ABANDON = "CONNECTION ABANDONED";
     public static final String SLOW_QUERY_NOTIFICATION = "SLOW QUERY";
     public static final String FAILED_QUERY_NOTIFICATION = "FAILED QUERY";
-    public static final String SUSPECT_ABANDONED_NOTIFICATION = "SUSPECT CONNETION ABANDONED";
+    public static final String SUSPECT_ABANDONED_NOTIFICATION = "SUSPECT CONNECTION ABANDONED";
     public static final String POOL_EMPTY = "POOL EMPTY";
+    public static final String SUSPECT_RETURNED_NOTIFICATION = "SUSPECT CONNECTION RETURNED";
 
     @Override
     public MBeanNotificationInfo[] getNotificationInfo() {
@@ -87,7 +121,8 @@ public class ConnectionPool extends NotificationBroadcasterSupport implements Co
     }
 
     public static MBeanNotificationInfo[] getDefaultNotificationInfo() {
-        String[] types = new String[] {NOTIFY_INIT, NOTIFY_CONNECT, NOTIFY_ABANDON, SLOW_QUERY_NOTIFICATION, FAILED_QUERY_NOTIFICATION, SUSPECT_ABANDONED_NOTIFICATION};
+        String[] types = new String[] {NOTIFY_INIT, NOTIFY_CONNECT, NOTIFY_ABANDON, SLOW_QUERY_NOTIFICATION,
+                FAILED_QUERY_NOTIFICATION, SUSPECT_ABANDONED_NOTIFICATION, POOL_EMPTY, SUSPECT_RETURNED_NOTIFICATION};
         String name = Notification.class.getName();
         String description = "A connection pool error condition was met.";
         MBeanNotificationInfo info = new MBeanNotificationInfo(types, name, description);
@@ -96,8 +131,8 @@ public class ConnectionPool extends NotificationBroadcasterSupport implements Co
 
     /**
      * Return true if the notification was sent successfully, false otherwise.
-     * @param type
-     * @param message
+     * @param type The notification type
+     * @param message The message
      * @return true if the notification succeeded
      */
     public boolean notify(final String type, String message) {
@@ -164,6 +199,41 @@ public class ConnectionPool extends NotificationBroadcasterSupport implements Co
         return pool.getWaitCount();
     }
 
+    @Override
+    public long getBorrowedCount() {
+        return pool.getBorrowedCount();
+    }
+
+    @Override
+    public long getReturnedCount() {
+        return pool.getReturnedCount();
+    }
+
+    @Override
+    public long getCreatedCount() {
+        return pool.getCreatedCount();
+    }
+
+    @Override
+    public long getReleasedCount() {
+        return pool.getReleasedCount();
+    }
+
+    @Override
+    public long getReconnectedCount() {
+        return pool.getReconnectedCount();
+    }
+
+    @Override
+    public long getRemoveAbandonedCount() {
+        return pool.getRemoveAbandonedCount();
+    }
+
+    @Override
+    public long getReleasedIdleCount() {
+        return pool.getReleasedIdleCount();
+    }
+
     //=================================================================
     //       POOL OPERATIONS
     //=================================================================
@@ -181,6 +251,12 @@ public class ConnectionPool extends NotificationBroadcasterSupport implements Co
     public void testIdle() {
         pool.testAllIdle();
     }
+
+    @Override
+    public void resetStats() {
+        pool.resetStats();
+    }
+
     //=================================================================
     //       POOL PROPERTIES
     //=================================================================
@@ -876,6 +952,22 @@ public class ConnectionPool extends NotificationBroadcasterSupport implements Co
      * {@inheritDoc}
      */
     @Override
+    public boolean getUseStatementFacade() {
+        return getPoolProperties().getUseStatementFacade();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void setUseStatementFacade(boolean useStatementFacade) {
+        getPoolProperties().setUseStatementFacade(useStatementFacade);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void purge() {
         pool.purge();
 
@@ -889,9 +981,4 @@ public class ConnectionPool extends NotificationBroadcasterSupport implements Co
         pool.purgeOnReturn();
 
     }
-
-
-
-
-
 }

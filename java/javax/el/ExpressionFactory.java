@@ -34,7 +34,6 @@ import java.security.PrivilegedAction;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -56,8 +55,7 @@ public abstract class ExpressionFactory {
     private static final String PROPERTY_FILE;
 
     private static final CacheValue nullTcclFactory = new CacheValue();
-    private static final ConcurrentMap<CacheKey, CacheValue> factoryCache =
-            new ConcurrentHashMap<>();
+    private static final Map<CacheKey, CacheValue> factoryCache = new ConcurrentHashMap<>();
 
     static {
         if (IS_SECURITY_ENABLED) {
@@ -103,7 +101,7 @@ public abstract class ExpressionFactory {
     public static ExpressionFactory newInstance(Properties properties) {
         ExpressionFactory result = null;
 
-        ClassLoader tccl = Thread.currentThread().getContextClassLoader();
+        ClassLoader tccl = Util.getContextClassLoader();
 
         CacheValue cacheValue;
         Class<?> clazz;
@@ -171,19 +169,19 @@ public abstract class ExpressionFactory {
                 }
             }
             if (constructor == null) {
-                result = (ExpressionFactory) clazz.newInstance();
+                result = (ExpressionFactory) clazz.getConstructor().newInstance();
             } else {
                 result =
                     (ExpressionFactory) constructor.newInstance(properties);
             }
 
-        } catch (InstantiationException | IllegalAccessException | IllegalArgumentException e) {
-            throw new ELException(
-                    "Unable to create ExpressionFactory of type: " + clazz.getName(),
-                    e);
         } catch (InvocationTargetException e) {
             Throwable cause = e.getCause();
             Util.handleThrowable(cause);
+            throw new ELException(
+                    "Unable to create ExpressionFactory of type: " + clazz.getName(),
+                    e);
+        } catch (ReflectiveOperationException | IllegalArgumentException e) {
             throw new ELException(
                     "Unable to create ExpressionFactory of type: " + clazz.getName(),
                     e);

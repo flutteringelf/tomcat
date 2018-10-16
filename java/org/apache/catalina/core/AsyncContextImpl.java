@@ -17,11 +17,9 @@
 package org.apache.catalina.core;
 
 import java.io.IOException;
-import java.lang.reflect.InvocationTargetException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.naming.NamingException;
@@ -47,8 +45,8 @@ import org.apache.coyote.AsyncContextCallback;
 import org.apache.coyote.RequestInfo;
 import org.apache.juli.logging.Log;
 import org.apache.juli.logging.LogFactory;
-import org.apache.tomcat.InstanceManager;
 import org.apache.tomcat.util.ExceptionUtils;
+import org.apache.tomcat.util.buf.UDecoder;
 import org.apache.tomcat.util.res.StringManager;
 
 public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
@@ -77,7 +75,6 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
     private long timeout = -1;
     private AsyncEvent event = null;
     private volatile Request request;
-    private volatile InstanceManager instanceManager;
 
     public AsyncContextImpl(Request request) {
         if (log.isDebugEnabled()) {
@@ -112,31 +109,18 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
                 }
             }
         } finally {
+            context.fireRequestDestroyEvent(request.getRequest());
             clearServletRequestResponse();
             context.unbind(Globals.IS_SECURITY_ENABLED, oldCL);
         }
-
-        // The application doesn't know it has to stop read and/or writing until
-        // it receives the complete event so the request and response have to be
-        // closed after firing the event.
-        try {
-            // First of all ensure that any data written to the response is
-            // written to the I/O layer.
-            request.getResponse().finishResponse();
-            // Close the request and the response.
-            request.getCoyoteRequest().action(ActionCode.END_REQUEST, null);
-        } catch (Throwable t) {
-            ExceptionUtils.handleThrowable(t);
-            // Catch this here and allow async context complete to continue
-            // normally so a dispatch takes place which ensures that  the
-            // request and response objects are correctly recycled.
-            log.debug(sm.getString("asyncContextImpl.finishResponseError"), t);
-        }
     }
+
 
     public boolean timeout() {
         AtomicBoolean result = new AtomicBoolean();
         request.getCoyoteRequest().action(ActionCode.ASYNC_TIMEOUT, result);
+        // Avoids NPEs during shutdown. A call to recycle will null this field.
+        Context context = this.context;
 
         if (result.get()) {
             ClassLoader oldCL = context.bind(false, null);
@@ -165,18 +149,21 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
     public void dispatch() {
         check();
         String path;
-        String pathInfo;
+        String cpath;
         ServletRequest servletRequest = getRequest();
         if (servletRequest instanceof HttpServletRequest) {
             HttpServletRequest sr = (HttpServletRequest) servletRequest;
-            path = sr.getServletPath();
-            pathInfo = sr.getPathInfo();
+            path = sr.getRequestURI();
+            cpath = sr.getContextPath();
         } else {
-            path = request.getServletPath();
-            pathInfo = request.getPathInfo();
+            path = request.getRequestURI();
+            cpath = request.getContextPath();
         }
-        if (pathInfo != null) {
-            path += pathInfo;
+        if (cpath.length() > 1) {
+            path = path.substring(cpath.length());
+        }
+        if (!context.getDispatchersUseEncodedPaths()) {
+            path = UDecoder.URLDecode(path, StandardCharsets.UTF_8);
         }
         dispatch(path);
     }
@@ -184,7 +171,7 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
     @Override
     public void dispatch(String path) {
         check();
-        dispatch(request.getServletContext(),path);
+        dispatch(getRequest().getServletContext(), path);
     }
 
     @Override
@@ -214,20 +201,8 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
                     (AsyncDispatcher) requestDispatcher;
             final ServletRequest servletRequest = getRequest();
             final ServletResponse servletResponse = getResponse();
-            Runnable run = new Runnable() {
-                @Override
-                public void run() {
-                    request.getCoyoteRequest().action(ActionCode.ASYNC_DISPATCHED, null);
-                    try {
-                        applicationDispatcher.dispatch(servletRequest, servletResponse);
-                    }catch (Exception x) {
-                        //log.error("Async.dispatch",x);
-                        throw new RuntimeException(x);
-                    }
-                }
-            };
-
-            this.dispatch = run;
+            this.dispatch = new AsyncRunnable(
+                    request, applicationDispatcher, servletRequest, servletResponse);
             this.request.getCoyoteRequest().action(ActionCode.ASYNC_DISPATCH, null);
             clearServletRequestResponse();
         }
@@ -277,6 +252,8 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
         check();
         AsyncListenerWrapper wrapper = new AsyncListenerWrapper();
         wrapper.setListener(listener);
+        wrapper.setServletRequest(servletRequest);
+        wrapper.setServletResponse(servletResponse);
         listeners.add(wrapper);
     }
 
@@ -287,22 +264,9 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
         check();
         T listener = null;
         try {
-             listener = (T) getInstanceManager().newInstance(clazz.getName(),
-                     clazz.getClassLoader());
-        } catch (InstantiationException e) {
-            ServletException se = new ServletException(e);
-            throw se;
-        } catch (IllegalAccessException e) {
-            ServletException se = new ServletException(e);
-            throw se;
-        } catch (InvocationTargetException e) {
-            ExceptionUtils.handleThrowable(e.getCause());
-            ServletException se = new ServletException(e);
-            throw se;
-        } catch (NamingException e) {
-            ServletException se = new ServletException(e);
-            throw se;
-        } catch (ClassNotFoundException e) {
+             listener = (T) context.getInstanceManager().newInstance(
+                     clazz.getName(), clazz.getClassLoader());
+        } catch (ReflectiveOperationException | NamingException e) {
             ServletException se = new ServletException(e);
             throw se;
         } catch (Exception e) {
@@ -321,7 +285,6 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
         dispatch = null;
         event = null;
         hasOriginalRequestAndResponse = true;
-        instanceManager = null;
         listeners.clear();
         request = null;
         clearServletRequestResponse();
@@ -427,7 +390,7 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
                 try {
                     listener.fireOnError(errorEvent);
                 } catch (Throwable t2) {
-                    ExceptionUtils.handleThrowable(t);
+                    ExceptionUtils.handleThrowable(t2);
                     log.warn("onError() failed for listener of type [" +
                             listener.getClass().getName() + "]", t2);
                 }
@@ -440,6 +403,10 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
         if (result.get()) {
             // No listener called dispatch() or complete(). This is an error.
             // SRV.2.3.3.3 (search for "error dispatch")
+            // Take a local copy to avoid threading issues if another thread
+            // clears this (can happen during error handling with non-container
+            // threads)
+            ServletResponse servletResponse = this.servletResponse;
             if (servletResponse instanceof HttpServletResponse) {
                 ((HttpServletResponse) servletResponse).setStatus(
                         HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
@@ -516,20 +483,6 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
         }
     }
 
-    private InstanceManager getInstanceManager() {
-        if (instanceManager == null) {
-            if (context instanceof StandardContext) {
-                instanceManager = ((StandardContext)context).getInstanceManager();
-            } else {
-                instanceManager = new DefaultInstanceManager(null,
-                        new HashMap<String, Map<String, String>>(),
-                        context,
-                        getClass().getClassLoader());
-            }
-        }
-        return instanceManager;
-    }
-
     private void check() {
         if (request == null) {
             // AsyncContext has been recycled and should not be being used
@@ -569,5 +522,34 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
             // executed.
             coyoteRequest.action(ActionCode.DISPATCH_EXECUTE, null);
         }
+    }
+
+
+    private static class AsyncRunnable implements Runnable {
+
+        private final AsyncDispatcher applicationDispatcher;
+        private final Request request;
+        private final ServletRequest servletRequest;
+        private final ServletResponse servletResponse;
+
+        public AsyncRunnable(Request request, AsyncDispatcher applicationDispatcher,
+                ServletRequest servletRequest, ServletResponse servletResponse) {
+            this.request = request;
+            this.applicationDispatcher = applicationDispatcher;
+            this.servletRequest = servletRequest;
+            this.servletResponse = servletResponse;
+        }
+
+        @Override
+        public void run() {
+            request.getCoyoteRequest().action(ActionCode.ASYNC_DISPATCHED, null);
+            try {
+                applicationDispatcher.dispatch(servletRequest, servletResponse);
+            }catch (Exception x) {
+                //log.error("Async.dispatch",x);
+                throw new RuntimeException(x);
+            }
+        }
+
     }
 }

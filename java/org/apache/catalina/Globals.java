@@ -118,9 +118,13 @@ public final class Globals {
      * We do this because of the pathInfo mangling happening when using
      * the CGIServlet in conjunction with the SSI servlet. (value stored
      * as an object of type String)
+     *
+     * @deprecated Unused. This is no longer used as the CGIO servlet now has
+     *             generic handling for when it is used as an include.
+     *             This will be removed in Tomcat 10
      */
-     public static final String SSI_FLAG_ATTR =
-         "org.apache.catalina.ssi.SSIServlet";
+    @Deprecated
+    public static final String SSI_FLAG_ATTR = "org.apache.catalina.ssi.SSIServlet";
 
 
     /**
@@ -222,7 +226,7 @@ public final class Globals {
      * compliance.
      */
     public static final boolean STRICT_SERVLET_COMPLIANCE =
-        Boolean.valueOf(System.getProperty("org.apache.catalina.STRICT_SERVLET_COMPLIANCE", "false")).booleanValue();
+        Boolean.parseBoolean(System.getProperty("org.apache.catalina.STRICT_SERVLET_COMPLIANCE", "false"));
 
 
     /**
@@ -271,4 +275,12 @@ public final class Globals {
      */
     public static final String JASPER_XML_BLOCK_EXTERNAL_INIT_PARAM =
             "org.apache.jasper.XML_BLOCK_EXTERNAL";
+
+    /**
+     * Name of the ServletContext attribute under which we store the context
+     * Realm's CredentialHandler (if both the Realm and the CredentialHandler
+     * exist).
+     */
+    public static final String CREDENTIAL_HANDLER
+            = "org.apache.catalina.CredentialHandler";
 }

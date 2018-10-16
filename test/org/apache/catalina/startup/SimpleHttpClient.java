@@ -33,6 +33,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
+import org.junit.Assert;
+
 /**
  * Simple client for unit testing. It isn't robust, it isn't secure and
  * should not be used as the basis for production code. Its only purpose
@@ -46,18 +48,19 @@ public abstract class SimpleHttpClient {
     public static final String LF = "\n";
     public static final String CRLF = CR + LF;
 
-    public static final String INFO_100 = "HTTP/1.1 100";
-    public static final String OK_200 = "HTTP/1.1 200";
-    public static final String REDIRECT_302 = "HTTP/1.1 302";
-    public static final String REDIRECT_303 = "HTTP/1.1 303";
-    public static final String FAIL_400 = "HTTP/1.1 400";
-    public static final String FAIL_404 = "HTTP/1.1 404";
-    public static final String TIMEOUT_408 = "HTTP/1.1 408";
-    public static final String FAIL_413 = "HTTP/1.1 413";
-    public static final String FAIL_417 = "HTTP/1.1 417";
+    public static final String INFO_100 = "HTTP/1.1 100 ";
+    public static final String OK_200 = "HTTP/1.1 200 ";
+    public static final String REDIRECT_302 = "HTTP/1.1 302 ";
+    public static final String REDIRECT_303 = "HTTP/1.1 303 ";
+    public static final String FAIL_400 = "HTTP/1.1 400 ";
+    public static final String FAIL_404 = "HTTP/1.1 404 ";
+    public static final String FAIL_405 = "HTTP/1.1 405 ";
+    public static final String TIMEOUT_408 = "HTTP/1.1 408 ";
+    public static final String FAIL_413 = "HTTP/1.1 413 ";
+    public static final String FAIL_417 = "HTTP/1.1 417 ";
     public static final String FAIL_50X = "HTTP/1.1 50";
-    public static final String FAIL_500 = "HTTP/1.1 500";
-    public static final String FAIL_501 = "HTTP/1.1 501";
+    public static final String FAIL_500 = "HTTP/1.1 500 ";
+    public static final String FAIL_501 = "HTTP/1.1 501 ";
 
     private static final String CONTENT_LENGTH_HEADER_PREFIX =
             "Content-Length: ";
@@ -298,7 +301,8 @@ public abstract class SimpleHttpClient {
         if (wantBody) {
             if (useContentLength && (contentLength > -1)) {
                 char[] body = new char[contentLength];
-                reader.read(body);
+                int read = reader.read(body);
+                Assert.assertEquals(contentLength, read);
                 builder.append(body);
             }
             else {
@@ -424,6 +428,10 @@ public abstract class SimpleHttpClient {
 
     public boolean isResponse404() {
         return responseLineStartsWith(FAIL_404);
+    }
+
+    public boolean isResponse405() {
+        return responseLineStartsWith(FAIL_405);
     }
 
     public boolean isResponse408() {

@@ -18,6 +18,7 @@
 package org.apache.catalina.mbeans;
 
 import java.io.File;
+import java.net.InetAddress;
 
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
@@ -27,6 +28,7 @@ import org.apache.catalina.Context;
 import org.apache.catalina.Engine;
 import org.apache.catalina.Host;
 import org.apache.catalina.JmxEnabled;
+import org.apache.catalina.Realm;
 import org.apache.catalina.Server;
 import org.apache.catalina.Service;
 import org.apache.catalina.Valve;
@@ -76,6 +78,7 @@ public class MBeanFactory {
 
     /**
      * Set the container that this factory was created for.
+     * @param container The associated container
      */
     public void setContainer(Object container) {
         this.container = container;
@@ -110,7 +113,7 @@ public class MBeanFactory {
         if ((j2eeType!=null) && (j2eeType.equals("WebModule"))) {
             String name = pname.getKeyProperty("name");
             name = name.substring(2);
-            int i = name.indexOf("/");
+            int i = name.indexOf('/');
             String hostName = name.substring(0,i);
             String path = name.substring(i);
             Container host = engine.findChild(hostName);
@@ -192,6 +195,7 @@ public class MBeanFactory {
      * @param parent MBean Name of the associated parent component
      * @param address The IP address on which to bind
      * @param port TCP port number to listen on
+     * @return the object name of the created connector
      *
      * @exception Exception if an MBean cannot be created or registered
      */
@@ -201,11 +205,18 @@ public class MBeanFactory {
         return createConnector(parent, address, port, true, false);
     }
 
+
     /**
      * Create a new DataSource Realm.
      *
      * @param parent MBean Name of the associated parent component
-     *
+     * @param dataSourceName the datasource name
+     * @param roleNameCol the column name for the role names
+     * @param userCredCol the column name for the user credentials
+     * @param userNameCol the column name for the user names
+     * @param userRoleTable the table name for the roles table
+     * @param userTable the table name for the users
+     * @return the object name of the created realm
      * @exception Exception if an MBean cannot be created or registered
      */
     public String createDataSourceRealm(String parent, String dataSourceName,
@@ -222,19 +233,27 @@ public class MBeanFactory {
         realm.setUserTable(userTable);
 
         // Add the new instance to its parent component
+        return addRealmToParent(parent, realm);
+    }
+
+
+    private String addRealmToParent(String parent, Realm realm) throws Exception {
         ObjectName pname = new ObjectName(parent);
         Container container = getParentContainerFromParent(pname);
         // Add the new instance to its parent component
         container.setRealm(realm);
         // Return the corresponding MBean name
-        ObjectName oname = realm.getObjectName();
+        ObjectName oname = null;
+        if (realm instanceof JmxEnabled) {
+            oname = ((JmxEnabled) realm).getObjectName();
+        }
         if (oname != null) {
-            return (oname.toString());
+            return oname.toString();
         } else {
             return null;
         }
-
     }
+
 
     /**
      * Create a new HttpConnector
@@ -242,6 +261,7 @@ public class MBeanFactory {
      * @param parent MBean Name of the associated parent component
      * @param address The IP address on which to bind
      * @param port TCP port number to listen on
+     * @return the object name of the created connector
      *
      * @exception Exception if an MBean cannot be created or registered
      */
@@ -249,6 +269,7 @@ public class MBeanFactory {
             throws Exception {
         return createConnector(parent, address, port, false, false);
     }
+
 
     /**
      * Create a new Connector
@@ -263,14 +284,14 @@ public class MBeanFactory {
      */
     private String createConnector(String parent, String address, int port, boolean isAjp, boolean isSSL)
         throws Exception {
-        Connector retobj = new Connector();
+        // Set the protocol in the constructor
+        String protocol = isAjp ? "AJP/1.3" : "HTTP/1.1";
+        Connector retobj = new Connector(protocol);
         if ((address!=null) && (address.length()>0)) {
             retobj.setProperty("address", address);
         }
         // Set port number
         retobj.setPort(port);
-        // Set the protocol
-        retobj.setProtocol(isAjp ? "AJP/1.3" : "HTTP/1.1");
         // Set SSL
         retobj.setSecure(isSSL);
         retobj.setScheme(isSSL ? "https" : "http");
@@ -283,7 +304,7 @@ public class MBeanFactory {
         // Return the corresponding MBean name
         ObjectName coname = retobj.getObjectName();
 
-        return (coname.toString());
+        return coname.toString();
     }
 
 
@@ -293,6 +314,7 @@ public class MBeanFactory {
      * @param parent MBean Name of the associated parent component
      * @param address The IP address on which to bind
      * @param port TCP port number to listen on
+     * @return the object name of the created connector
      *
      * @exception Exception if an MBean cannot be created or registered
      */
@@ -301,10 +323,16 @@ public class MBeanFactory {
         return createConnector(parent, address, port, false, true);
     }
 
+
     /**
      * Create a new JDBC Realm.
      *
      * @param parent MBean Name of the associated parent component
+     * @param driverName JDBC driver name
+     * @param connectionName the user name for the connection
+     * @param connectionPassword the password for the connection
+     * @param connectionURL the connection URL to the database
+     * @return the object name of the created realm
      *
      * @exception Exception if an MBean cannot be created or registered
      */
@@ -320,19 +348,7 @@ public class MBeanFactory {
         realm.setConnectionURL(connectionURL);
 
         // Add the new instance to its parent component
-        ObjectName pname = new ObjectName(parent);
-        Container container = getParentContainerFromParent(pname);
-        // Add the new instance to its parent component
-        container.setRealm(realm);
-        // Return the corresponding MBean name
-        ObjectName oname = realm.getObjectName();
-
-        if (oname != null) {
-            return (oname.toString());
-        } else {
-            return null;
-        }
-
+        return addRealmToParent(parent, realm);
     }
 
 
@@ -340,30 +356,17 @@ public class MBeanFactory {
      * Create a new JNDI Realm.
      *
      * @param parent MBean Name of the associated parent component
+     * @return the object name of the created realm
      *
      * @exception Exception if an MBean cannot be created or registered
      */
-    public String createJNDIRealm(String parent)
-        throws Exception {
+    public String createJNDIRealm(String parent) throws Exception {
 
          // Create a new JNDIRealm instance
         JNDIRealm realm = new JNDIRealm();
 
         // Add the new instance to its parent component
-        ObjectName pname = new ObjectName(parent);
-        Container container = getParentContainerFromParent(pname);
-        // Add the new instance to its parent component
-        container.setRealm(realm);
-        // Return the corresponding MBean name
-        ObjectName oname = realm.getObjectName();
-
-        if (oname != null) {
-            return (oname.toString());
-        } else {
-            return null;
-        }
-
-
+        return addRealmToParent(parent, realm);
     }
 
 
@@ -371,28 +374,17 @@ public class MBeanFactory {
      * Create a new Memory Realm.
      *
      * @param parent MBean Name of the associated parent component
+     * @return the object name of the created realm
      *
      * @exception Exception if an MBean cannot be created or registered
      */
-    public String createMemoryRealm(String parent)
-        throws Exception {
+    public String createMemoryRealm(String parent) throws Exception {
 
          // Create a new MemoryRealm instance
         MemoryRealm realm = new MemoryRealm();
 
         // Add the new instance to its parent component
-        ObjectName pname = new ObjectName(parent);
-        Container container = getParentContainerFromParent(pname);
-        // Add the new instance to its parent component
-        container.setRealm(realm);
-        // Return the corresponding MBean name
-        ObjectName oname = realm.getObjectName();
-        if (oname != null) {
-            return (oname.toString());
-        } else {
-            return null;
-        }
-
+        return addRealmToParent(parent, realm);
     }
 
 
@@ -402,6 +394,7 @@ public class MBeanFactory {
      * @param parent MBean Name of the associated parent component
      * @param path The context path for this Context
      * @param docBase Document base directory (or WAR) for this Context
+     * @return the object name of the created context
      *
      * @exception Exception if an MBean cannot be created or registered
      */
@@ -422,6 +415,7 @@ public class MBeanFactory {
      * @param docBase Document base directory (or WAR) for this Context
      * @param xmlValidation if XML descriptors should be validated
      * @param xmlNamespaceAware if the XML processor should namespace aware
+     * @return the object name of the created context
      *
      * @exception Exception if an MBean cannot be created or registered
      */
@@ -469,7 +463,7 @@ public class MBeanFactory {
         } else {
             log.warn("Deployer not found for "+pname.getKeyProperty("host"));
             Service service = getService(pname);
-            Engine engine = (Engine) service.getContainer();
+            Engine engine = service.getContainer();
             Host host = (Host) engine.findChild(pname.getKeyProperty("host"));
             host.addChild(context);
         }
@@ -490,6 +484,7 @@ public class MBeanFactory {
      * @param deployOnStartup Deploy on server startup?
      * @param deployXML Should we deploy Context XML config files property?
      * @param unpackWARs Should we unpack WARs when auto deploying?
+     * @return the object name of the created host
      *
      * @exception Exception if an MBean cannot be created or registered
      */
@@ -517,11 +512,11 @@ public class MBeanFactory {
         // Add the new instance to its parent component
         ObjectName pname = new ObjectName(parent);
         Service service = getService(pname);
-        Engine engine = (Engine) service.getContainer();
+        Engine engine = service.getContainer();
         engine.addChild(host);
 
         // Return the corresponding MBean name
-        return (host.getObjectName().toString());
+        return host.getObjectName().toString();
 
     }
 
@@ -532,6 +527,7 @@ public class MBeanFactory {
      * @param domain       Domain name for the container instance
      * @param defaultHost  Name of the default host to be used in the Engine
      * @param baseDir      Base directory value for Engine
+     * @return the object name of the created service
      *
      * @exception Exception if an MBean cannot be created or registered
      */
@@ -561,6 +557,7 @@ public class MBeanFactory {
      * Create a new StandardManager.
      *
      * @param parent MBean Name of the associated parent component
+     * @return the object name of the created manager
      *
      * @exception Exception if an MBean cannot be created or registered
      */
@@ -580,7 +577,7 @@ public class MBeanFactory {
         }
         ObjectName oname = manager.getObjectName();
         if (oname != null) {
-            return (oname.toString());
+            return oname.toString();
         } else {
             return null;
         }
@@ -594,6 +591,7 @@ public class MBeanFactory {
      * @param parent MBean Name of the associated parent component
      * @param resourceName Global JNDI resource name of the associated
      *  UserDatabase
+     * @return the object name of the created realm
      *
      * @exception Exception if an MBean cannot be created or registered
      */
@@ -605,21 +603,7 @@ public class MBeanFactory {
         realm.setResourceName(resourceName);
 
         // Add the new instance to its parent component
-        ObjectName pname = new ObjectName(parent);
-        Container container = getParentContainerFromParent(pname);
-        // Add the new instance to its parent component
-        container.setRealm(realm);
-        // Return the corresponding MBean name
-        ObjectName oname = realm.getObjectName();
-        // FIXME getObjectName() returns null
-        //ObjectName oname =
-        //    MBeanUtils.createObjectName(pname.getDomain(), realm);
-        if (oname != null) {
-            return (oname.toString());
-        } else {
-            return null;
-        }
-
+        return addRealmToParent(parent, realm);
     }
 
 
@@ -634,6 +618,7 @@ public class MBeanFactory {
      * @return  The MBean name of the {@link Valve} that was created or
      *          <code>null</code> if the {@link Valve} does not implement
      *          {@link JmxEnabled}.
+     * @exception Exception if an MBean cannot be created or registered
      */
     public String createValve(String className, String parent)
             throws Exception {
@@ -647,7 +632,7 @@ public class MBeanFactory {
             throw new IllegalArgumentException();
         }
 
-        Valve valve = (Valve) Class.forName(className).newInstance();
+        Valve valve = (Valve) Class.forName(className).getConstructor().newInstance();
 
         container.getPipeline().addValve(valve);
 
@@ -663,6 +648,7 @@ public class MBeanFactory {
      * Create a new Web Application Loader.
      *
      * @param parent MBean Name of the associated parent component
+     * @return the object name of the created loader
      *
      * @exception Exception if an MBean cannot be created or registered
      */
@@ -682,7 +668,7 @@ public class MBeanFactory {
         //ObjectName oname = loader.getObjectName();
         ObjectName oname =
             MBeanUtils.createObjectName(pname.getDomain(), loader);
-        return (oname.toString());
+        return oname.toString();
 
     }
 
@@ -700,29 +686,35 @@ public class MBeanFactory {
         ObjectName oname = new ObjectName(name);
         Service service = getService(oname);
         String port = oname.getKeyProperty("port");
-        //String address = oname.getKeyProperty("address");
+        String address = oname.getKeyProperty("address");
+        if (address != null) {
+            address = ObjectName.unquote(address);
+        }
 
         Connector conns[] = service.findConnectors();
 
         for (int i = 0; i < conns.length; i++) {
-            String connAddress = String.valueOf(conns[i].getProperty("address"));
+            String connAddress = null;
+            Object objConnAddress = conns[i].getProperty("address");
+            if (objConnAddress != null) {
+                connAddress = ((InetAddress) objConnAddress).getHostAddress();
+            }
             String connPort = ""+conns[i].getPort();
 
-            // if (((address.equals("null")) &&
-            if ((connAddress==null) && port.equals(connPort)) {
-                service.removeConnector(conns[i]);
-                conns[i].destroy();
-                break;
-            }
-            // } else if (address.equals(connAddress))
-            if (port.equals(connPort)) {
-                // Remove this component from its parent component
+            if (address == null) {
+                // Don't combine this with outer if or we could get an NPE in
+                // 'else if' below
+                if (connAddress == null && port.equals(connPort)) {
+                    service.removeConnector(conns[i]);
+                    conns[i].destroy();
+                    break;
+                }
+            } else if (address.equals(connAddress) && port.equals(connPort)) {
                 service.removeConnector(conns[i]);
                 conns[i].destroy();
                 break;
             }
         }
-
     }
 
 
@@ -740,10 +732,10 @@ public class MBeanFactory {
         String domain = oname.getDomain();
         StandardService service = (StandardService) getService(oname);
 
-        Engine engine = (Engine) service.getContainer();
+        Engine engine = service.getContainer();
         String name = oname.getKeyProperty("name");
         name = name.substring(2);
-        int i = name.indexOf("/");
+        int i = name.indexOf('/');
         String hostName = name.substring(0,i);
         String path = name.substring(i);
         ObjectName deployer = new ObjectName(domain+":type=Deployer,host="+
@@ -767,7 +759,7 @@ public class MBeanFactory {
             host.removeChild(context);
             if(context instanceof StandardContext)
             try {
-                ((StandardContext)context).destroy();
+                context.destroy();
             } catch (Exception e) {
                 log.warn("Error during context [" + context.getName() + "] destroy ", e);
            }
@@ -790,7 +782,7 @@ public class MBeanFactory {
         ObjectName oname = new ObjectName(name);
         String hostName = oname.getKeyProperty("host");
         Service service = getService(oname);
-        Engine engine = (Engine) service.getContainer();
+        Engine engine = service.getContainer();
         Host host = (Host) engine.findChild(hostName);
 
         // Remove this component from its parent component

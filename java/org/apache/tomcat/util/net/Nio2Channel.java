@@ -33,7 +33,7 @@ import java.util.concurrent.TimeoutException;
  */
 public class Nio2Channel implements AsynchronousByteChannel {
 
-    protected static ByteBuffer emptyBuf = ByteBuffer.allocate(0);
+    protected static final ByteBuffer emptyBuf = ByteBuffer.allocate(0);
 
     protected AsynchronousSocketChannel sc = null;
     protected SocketWrapperBase<Nio2Channel> socket = null;
@@ -44,7 +44,10 @@ public class Nio2Channel implements AsynchronousByteChannel {
     }
 
     /**
-     * Reset the channel
+     * Reset the channel.
+     *
+     * @param channel The new async channel to associate with this NIO2 channel
+     * @param socket  The new socket to associate with this NIO2 channel
      *
      * @throws IOException If a problem was encountered resetting the channel
      */
@@ -123,7 +126,8 @@ public class Nio2Channel implements AsynchronousByteChannel {
      * implementation.
      *
      * @return Always returns zero
-     * @throws IOException
+     *
+     * @throws IOException Never for non-secure channel
      */
     public int handshake() throws IOException {
         return 0;
@@ -142,7 +146,7 @@ public class Nio2Channel implements AsynchronousByteChannel {
     @Override
     public <A> void read(ByteBuffer dst, A attachment,
             CompletionHandler<Integer, ? super A> handler) {
-        read(dst, Integer.MAX_VALUE, TimeUnit.MILLISECONDS, attachment, handler);
+        read(dst, 0L, TimeUnit.MILLISECONDS, attachment, handler);
     }
 
     public <A> void read(ByteBuffer dst,
@@ -165,7 +169,7 @@ public class Nio2Channel implements AsynchronousByteChannel {
     @Override
     public <A> void write(ByteBuffer src, A attachment,
             CompletionHandler<Integer, ? super A> handler) {
-        write(src, Integer.MAX_VALUE, TimeUnit.MILLISECONDS, attachment, handler);
+        write(src, 0L, TimeUnit.MILLISECONDS, attachment, handler);
     }
 
     public <A> void write(ByteBuffer src, long timeout, TimeUnit unit, A attachment,
@@ -209,4 +213,12 @@ public class Nio2Channel implements AsynchronousByteChannel {
         return DONE;
     }
 
+
+    private ApplicationBufferHandler appReadBufHandler;
+    public void setAppReadBufHandler(ApplicationBufferHandler handler) {
+        this.appReadBufHandler = handler;
+    }
+    protected ApplicationBufferHandler getAppReadBufHandler() {
+        return appReadBufHandler;
+    }
 }

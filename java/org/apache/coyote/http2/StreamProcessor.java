@@ -16,385 +16,336 @@
  */
 package org.apache.coyote.http2;
 
+import java.io.File;
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.util.Iterator;
-import java.util.Set;
-import java.util.concurrent.CopyOnWriteArraySet;
-import java.util.concurrent.atomic.AtomicBoolean;
-
-import javax.servlet.http.HttpUpgradeHandler;
 
 import org.apache.coyote.AbstractProcessor;
 import org.apache.coyote.ActionCode;
 import org.apache.coyote.Adapter;
-import org.apache.coyote.AsyncContextCallback;
 import org.apache.coyote.ContainerThreadMarker;
 import org.apache.coyote.ErrorState;
+import org.apache.coyote.Request;
+import org.apache.coyote.Response;
+import org.apache.coyote.http11.filters.GzipOutputFilter;
 import org.apache.juli.logging.Log;
 import org.apache.juli.logging.LogFactory;
+import org.apache.tomcat.util.buf.ByteChunk;
+import org.apache.tomcat.util.http.FastHttpDateFormat;
+import org.apache.tomcat.util.http.MimeHeaders;
 import org.apache.tomcat.util.net.AbstractEndpoint.Handler.SocketState;
 import org.apache.tomcat.util.net.DispatchType;
-import org.apache.tomcat.util.net.SSLSupport;
-import org.apache.tomcat.util.net.SocketStatus;
+import org.apache.tomcat.util.net.SendfileState;
+import org.apache.tomcat.util.net.SocketEvent;
 import org.apache.tomcat.util.net.SocketWrapperBase;
 import org.apache.tomcat.util.res.StringManager;
 
-public class StreamProcessor extends AbstractProcessor implements Runnable {
+class StreamProcessor extends AbstractProcessor {
 
     private static final Log log = LogFactory.getLog(StreamProcessor.class);
     private static final StringManager sm = StringManager.getManager(StreamProcessor.class);
 
+    private final Http2UpgradeHandler handler;
     private final Stream stream;
-    private Set<DispatchType> dispatches = new CopyOnWriteArraySet<>();
+    private SendfileData sendfileData = null;
+    private SendfileState sendfileState = null;
 
-    private volatile SSLSupport sslSupport;
 
-
-    public StreamProcessor(Stream stream, Adapter adapter, SocketWrapperBase<?> socketWrapper) {
-        super(stream.getCoyoteRequest(), stream.getCoyoteResponse());
+    StreamProcessor(Http2UpgradeHandler handler, Stream stream, Adapter adapter,
+            SocketWrapperBase<?> socketWrapper) {
+        super(adapter, stream.getCoyoteRequest(), stream.getCoyoteResponse());
+        this.handler = handler;
         this.stream = stream;
-        setAdapter(adapter);
         setSocketWrapper(socketWrapper);
     }
 
 
-    @Override
-    public synchronized void run() {
-        SocketStatus status = SocketStatus.OPEN_READ;
-
-        // HTTP/2 equivalent of AbstractConnectionHandler#process() without the
-        // socket <-> processor mapping
-        ContainerThreadMarker.set();
-        SocketState state = SocketState.CLOSED;
+    final void process(SocketEvent event) {
         try {
-            Iterator<DispatchType> dispatches = getIteratorAndClearDispatches();
-            do {
-                if (log.isDebugEnabled()) {
-                    log.debug(sm.getString("streamProcessor.process.loopstart",
-                            stream.getConnectionId(), stream.getIdentifier(), status, dispatches));
-                }
-                // TODO CLOSE_NOW ?
-                if (dispatches != null) {
-                    DispatchType nextDispatch = dispatches.next();
-                    state = dispatch(nextDispatch.getSocketStatus());
-                // TODO DISCONNECT ?
-                } else if (isAsync()) {
-                    state = dispatch(status);
-                } else if (state == SocketState.ASYNC_END) {
-                    state = dispatch(status);
-                } else {
-                    state = process((SocketWrapperBase<?>) null);
-                }
+            // FIXME: the regular processor syncs on socketWrapper, but here this deadlocks
+            synchronized (this) {
+                // HTTP/2 equivalent of AbstractConnectionHandler#process() without the
+                // socket <-> processor mapping
+                ContainerThreadMarker.set();
+                SocketState state = SocketState.CLOSED;
+                try {
+                    state = process(socketWrapper, event);
 
-                if (state != SocketState.CLOSED && isAsync()) {
-                    state = asyncStateMachine.asyncPostProcess();
+                    if (state == SocketState.CLOSED) {
+                        if (!getErrorState().isConnectionIoAllowed()) {
+                            ConnectionException ce = new ConnectionException(sm.getString(
+                                    "streamProcessor.error.connection", stream.getConnectionId(),
+                                    stream.getIdentifier()), Http2Error.INTERNAL_ERROR);
+                            stream.close(ce);
+                        } else if (!getErrorState().isIoAllowed()) {
+                            StreamException se = new StreamException(sm.getString(
+                                    "streamProcessor.error.stream", stream.getConnectionId(),
+                                    stream.getIdentifier()), Http2Error.INTERNAL_ERROR,
+                                    stream.getIdentifier().intValue());
+                            stream.close(se);
+                        }
+                    }
+                } catch (Exception e) {
+                    String msg = sm.getString("streamProcessor.error.connection",
+                            stream.getConnectionId(), stream.getIdentifier());
+                    if (log.isDebugEnabled()) {
+                        log.debug(msg, e);
+                    }
+                    ConnectionException ce = new ConnectionException(msg, Http2Error.INTERNAL_ERROR);
+                    ce.initCause(e);
+                    stream.close(ce);
+                } finally {
+                    ContainerThreadMarker.clear();
                 }
-
-                if (dispatches == null || !dispatches.hasNext()) {
-                    // Only returns non-null iterator if there are
-                    // dispatches to process.
-                    dispatches = getIteratorAndClearDispatches();
-                }
-                if (log.isDebugEnabled()) {
-                    log.debug(sm.getString("streamProcessor.process.loopend",
-                            stream.getConnectionId(), stream.getIdentifier(), state, dispatches));
-                }
-            } while (state == SocketState.ASYNC_END ||
-                    dispatches != null && state != SocketState.CLOSED);
-
-            if (state == SocketState.CLOSED) {
-                // TODO
             }
-        } catch (Exception e) {
-            // TODO
-            e.printStackTrace();
         } finally {
-            ContainerThreadMarker.clear();
+            handler.executeQueuedStream();
         }
     }
 
 
     @Override
-    public void action(ActionCode actionCode, Object param) {
-        switch (actionCode) {
-        // 'Normal' servlet support
-        case COMMIT: {
-            if (!response.isCommitted()) {
-                try {
-                    response.setCommitted(true);
-                    stream.writeHeaders();
-                } catch (IOException ioe) {
-                    // TODO: Handle this
-                }
-            }
-            break;
+    protected final void prepareResponse() throws IOException {
+        response.setCommitted(true);
+        if (handler.hasAsyncIO() && handler.getProtocol().getUseSendfile()) {
+            prepareSendfile();
         }
-        case CLOSE: {
-            action(ActionCode.COMMIT, null);
+        prepareHeaders(request, response, sendfileData == null, handler.getProtocol(), stream);
+        stream.writeHeaders();
+    }
+
+
+    private void prepareSendfile() {
+        String fileName = (String) stream.getCoyoteRequest().getAttribute(
+                org.apache.coyote.Constants.SENDFILE_FILENAME_ATTR);
+        if (fileName != null) {
+            sendfileData = new SendfileData();
+            sendfileData.path = new File(fileName).toPath();
+            sendfileData.pos = ((Long) stream.getCoyoteRequest().getAttribute(
+                    org.apache.coyote.Constants.SENDFILE_FILE_START_ATTR)).longValue();
+            sendfileData.end = ((Long) stream.getCoyoteRequest().getAttribute(
+                    org.apache.coyote.Constants.SENDFILE_FILE_END_ATTR)).longValue();
+            sendfileData.left = sendfileData.end - sendfileData.pos;
+            sendfileData.stream = stream;
+        }
+    }
+
+
+    // Static so it can be used by Stream to build the MimeHeaders required for
+    // an ACK. For that use case coyoteRequest, protocol and stream will be null.
+    static void prepareHeaders(Request coyoteRequest, Response coyoteResponse, boolean noSendfile,
+            Http2Protocol protocol, Stream stream) {
+        MimeHeaders headers = coyoteResponse.getMimeHeaders();
+        int statusCode = coyoteResponse.getStatus();
+
+        // Add the pseudo header for status
+        headers.addValue(":status").setString(Integer.toString(statusCode));
+
+        // Check to see if a response body is present
+        if (!(statusCode < 200 || statusCode == 205 || statusCode == 304)) {
+            String contentType = coyoteResponse.getContentType();
+            if (contentType != null) {
+                headers.setValue("content-type").setString(contentType);
+            }
+            String contentLanguage = coyoteResponse.getContentLanguage();
+            if (contentLanguage != null) {
+                headers.setValue("content-language").setString(contentLanguage);
+            }
+        }
+
+        // Add date header unless it is an informational response or the
+        // application has already set one
+        if (statusCode >= 200 && headers.getValue("date") == null) {
+            headers.addValue("date").setString(FastHttpDateFormat.getCurrentDate());
+        }
+
+        // Compression can't be used with sendfile
+        if (noSendfile && protocol != null &&
+                protocol.useCompression(coyoteRequest, coyoteResponse)) {
+            // Enable compression. Headers will have been set. Need to configure
+            // output filter at this point.
+            stream.addOutputFilter(new GzipOutputFilter());
+        }
+    }
+
+
+    @Override
+    protected final void finishResponse() throws IOException {
+        sendfileState = handler.processSendfile(sendfileData);
+        if (!(sendfileState == SendfileState.PENDING)) {
+            stream.getOutputBuffer().end();
+        }
+    }
+
+
+    @Override
+    protected final void ack() {
+        if (!response.isCommitted() && request.hasExpectation()) {
             try {
-                stream.getOutputBuffer().close();
+                stream.writeAck();
             } catch (IOException ioe) {
-                // TODO
+                setErrorState(ErrorState.CLOSE_CONNECTION_NOW, ioe);
             }
-            break;
-        }
-        case ACK: {
-            if (!response.isCommitted() && request.hasExpectation()) {
-                try {
-                    stream.writeAck();
-                } catch (IOException ioe) {
-                    // TODO
-                }
-            }
-            break;
-        }
-        case CLIENT_FLUSH: {
-            action(ActionCode.COMMIT, null);
-            try {
-                stream.flushData();
-            } catch (IOException ioe) {
-                response.setErrorException(ioe);
-                // TODO: Shut stream down?
-            }
-            break;
-        }
-        case IS_ERROR: {
-            ((AtomicBoolean) param).set(getErrorState().isError());
-            break;
-        }
-        case AVAILABLE: {
-            request.setAvailable(stream.getInputBuffer().available());
-            break;
-        }
-
-        // Request attribute support
-        case REQ_HOST_ADDR_ATTRIBUTE: {
-            request.remoteAddr().setString(socketWrapper.getRemoteAddr());
-            break;
-        }
-        case REQ_HOST_ATTRIBUTE: {
-            request.remoteHost().setString(socketWrapper.getRemoteHost());
-            break;
-        }
-        case REQ_LOCALPORT_ATTRIBUTE: {
-            request.setLocalPort(socketWrapper.getLocalPort());
-            break;
-        }
-        case REQ_LOCAL_ADDR_ATTRIBUTE: {
-            request.localAddr().setString(socketWrapper.getLocalAddr());
-            break;
-        }
-        case REQ_LOCAL_NAME_ATTRIBUTE: {
-            request.localName().setString(socketWrapper.getLocalName());
-            break;
-        }
-        case REQ_REMOTEPORT_ATTRIBUTE: {
-            request.setRemotePort(socketWrapper.getRemotePort());
-            break;
-        }
-
-        // SSL request attribute support
-        case REQ_SSL_ATTRIBUTE: {
-            try {
-                if (sslSupport != null) {
-                    Object sslO = sslSupport.getCipherSuite();
-                    if (sslO != null) {
-                        request.setAttribute(SSLSupport.CIPHER_SUITE_KEY, sslO);
-                    }
-                    sslO = sslSupport.getPeerCertificateChain();
-                    if (sslO != null) {
-                        request.setAttribute(SSLSupport.CERTIFICATE_KEY, sslO);
-                    }
-                    sslO = sslSupport.getKeySize();
-                    if (sslO != null) {
-                        request.setAttribute(SSLSupport.KEY_SIZE_KEY, sslO);
-                    }
-                    sslO = sslSupport.getSessionId();
-                    if (sslO != null) {
-                        request.setAttribute(SSLSupport.SESSION_ID_KEY, sslO);
-                    }
-                    sslO = sslSupport.getProtocol();
-                    if (sslO != null) {
-                        request.setAttribute(SSLSupport.PROTOCOL_VERSION_KEY, sslO);
-                    }
-                    request.setAttribute(SSLSupport.SESSION_MGR, sslSupport);
-                }
-            } catch (Exception e) {
-                log.warn(sm.getString("streamProcessor.ssl.error"), e);
-            }
-            break;
-        }
-        case REQ_SSL_CERTIFICATE: {
-            // No re-negotiation support in HTTP/2. Either the certificate is
-            // available or it isn't.
-            try {
-                if (sslSupport != null) {
-                    Object sslO = sslSupport.getCipherSuite();
-                    sslO = sslSupport.getPeerCertificateChain();
-                    if (sslO != null) {
-                        request.setAttribute(SSLSupport.CERTIFICATE_KEY, sslO);
-                    }
-                }
-            } catch (Exception e) {
-                log.warn(sm.getString("streamProcessor.ssl.error"), e);
-            }
-            break;
-        }
-
-        // Servlet 3.0 asynchronous support
-        case ASYNC_START: {
-            asyncStateMachine.asyncStart((AsyncContextCallback) param);
-            break;
-        }
-        case ASYNC_COMPLETE: {
-            if (asyncStateMachine.asyncComplete()) {
-                socketWrapper.getEndpoint().getExecutor().execute(this);
-            }
-            break;
-        }
-        case ASYNC_DISPATCH: {
-            if (asyncStateMachine.asyncDispatch()) {
-                socketWrapper.getEndpoint().getExecutor().execute(this);
-            }
-            break;
-        }
-        case ASYNC_DISPATCHED: {
-            asyncStateMachine.asyncDispatched();
-            break;
-        }
-        case ASYNC_ERROR: {
-            asyncStateMachine.asyncError();
-            break;
-        }
-        case ASYNC_IS_ASYNC: {
-            ((AtomicBoolean) param).set(asyncStateMachine.isAsync());
-            break;
-        }
-        case ASYNC_IS_COMPLETING: {
-            ((AtomicBoolean) param).set(asyncStateMachine.isCompleting());
-            break;
-        }
-        case ASYNC_IS_DISPATCHING: {
-            ((AtomicBoolean) param).set(asyncStateMachine.isAsyncDispatching());
-            break;
-        }
-        case ASYNC_IS_ERROR: {
-            ((AtomicBoolean) param).set(asyncStateMachine.isAsyncError());
-            break;
-        }
-        case ASYNC_IS_STARTED: {
-            ((AtomicBoolean) param).set(asyncStateMachine.isAsyncStarted());
-            break;
-        }
-        case ASYNC_IS_TIMINGOUT: {
-            ((AtomicBoolean) param).set(asyncStateMachine.isAsyncTimingOut());
-            break;
-        }
-        case ASYNC_RUN: {
-            asyncStateMachine.asyncRun((Runnable) param);
-            break;
-        }
-        case ASYNC_SETTIMEOUT: {
-            // TODO
-            break;
-        }
-        case ASYNC_TIMEOUT: {
-            AtomicBoolean result = (AtomicBoolean) param;
-            result.set(asyncStateMachine.asyncTimeout());
-            break;
-        }
-
-        // Servlet 3.1 non-blocking I/O
-        case REQUEST_BODY_FULLY_READ: {
-            AtomicBoolean result = (AtomicBoolean) param;
-            result.set(stream.getInputBuffer().isRequestBodyFullyRead());
-            break;
-        }
-        case NB_READ_INTEREST: {
-            AtomicBoolean result = (AtomicBoolean) param;
-            result.set(stream.getInputBuffer().isReady());
-            break;
-        }
-        case NB_WRITE_INTEREST: {
-            AtomicBoolean result = (AtomicBoolean) param;
-            result.set(stream.getOutputBuffer().isReady());
-            break;
-        }
-        case DISPATCH_READ: {
-            dispatches.add(DispatchType.NON_BLOCKING_READ);
-            break;
-        }
-        case DISPATCH_WRITE: {
-            dispatches.add(DispatchType.NON_BLOCKING_WRITE);
-            break;
-        }
-        case DISPATCH_EXECUTE: {
-            socketWrapper.getEndpoint().getExecutor().execute(this);
-            break;
-        }
-
-        // Unsupported / illegal under HTTP/2
-        case UPGRADE:
-            throw new UnsupportedOperationException(
-                    sm.getString("streamProcessor.httpupgrade.notsupported"));
-
-        // Unimplemented / to review
-        case CLOSE_NOW:
-        case DISABLE_SWALLOW_INPUT:
-        case END_REQUEST:
-        case REQ_SET_BODY_REPLAY:
-        case RESET:
-            log.info("TODO: Implement [" + actionCode + "] for HTTP/2");
-            break;
         }
     }
 
 
     @Override
-    public void setSslSupport(SSLSupport sslSupport) {
-        this.sslSupport = sslSupport;
+    protected final void flush() throws IOException {
+        stream.getOutputBuffer().flush();
     }
 
 
     @Override
-    public void recycle() {
+    protected final int available(boolean doRead) {
+        return stream.getInputBuffer().available();
+    }
+
+
+    @Override
+    protected final void setRequestBody(ByteChunk body) {
+        stream.getInputBuffer().insertReplayedBody(body);
+        try {
+            stream.receivedEndOfStream();
+        } catch (ConnectionException e) {
+            // Exception will not be thrown in this case
+        }
+    }
+
+
+    @Override
+    protected final void setSwallowResponse() {
+        // NO-OP
+    }
+
+
+    @Override
+    protected final void disableSwallowRequest() {
+        // NO-OP
+        // HTTP/2 has to swallow any input received to ensure that the flow
+        // control windows are correctly tracked.
+    }
+
+
+    @Override
+    protected void processSocketEvent(SocketEvent event, boolean dispatch) {
+        if (dispatch) {
+            handler.processStreamOnContainerThread(this, event);
+        } else {
+            this.process(event);
+        }
+    }
+
+
+    @Override
+    protected final boolean isRequestBodyFullyRead() {
+        return stream.getInputBuffer().isRequestBodyFullyRead();
+    }
+
+
+    @Override
+    protected final void registerReadInterest() {
+        stream.getInputBuffer().registerReadInterest();
+    }
+
+
+    @Override
+    protected final boolean isReady() {
+        return stream.isReady();
+    }
+
+
+    @Override
+    protected final void executeDispatches() {
+        Iterator<DispatchType> dispatches = getIteratorAndClearDispatches();
+        /*
+         * Compare with superclass that uses SocketWrapper
+         * A sync is not necessary here as the window sizes are updated with
+         * syncs before the dispatches are executed and it is the window size
+         * updates that need to be complete before the dispatch executes.
+         */
+        while (dispatches != null && dispatches.hasNext()) {
+            DispatchType dispatchType = dispatches.next();
+            /*
+             * Dispatch on new thread.
+             * Firstly, this avoids a deadlock on the SocketWrapper as Streams
+             * being processed by container threads lock the SocketProcessor
+             * before they lock the SocketWrapper which is the opposite order to
+             * container threads processing via Http2UpgrageHandler.
+             * Secondly, this code executes after a Window update has released
+             * one or more Streams. By dispatching each Stream to a dedicated
+             * thread, those Streams may progress concurrently.
+             */
+            processSocketEvent(dispatchType.getSocketStatus(), true);
+        }
+    }
+
+
+    @Override
+    protected final boolean isPushSupported() {
+        return stream.isPushSupported();
+    }
+
+
+    @Override
+    protected final void doPush(Request pushTarget) {
+        try {
+            stream.push(pushTarget);
+        } catch (IOException ioe) {
+            setErrorState(ErrorState.CLOSE_CONNECTION_NOW, ioe);
+            response.setErrorException(ioe);
+        }
+    }
+
+
+    @Override
+    protected boolean isTrailerFieldsReady() {
+        return stream.isTrailerFieldsReady();
+    }
+
+
+    @Override
+    protected boolean isTrailerFieldsSupported() {
+        return stream.isTrailerFieldsSupported();
+    }
+
+
+    @Override
+    public final void recycle() {
         // StreamProcessor instances are not re-used.
         // Clear fields that can be cleared to aid GC and trigger NPEs if this
         // is reused
         setSocketWrapper(null);
-        setAdapter(null);
-        setClientCertProvider(null);
     }
 
 
     @Override
-    public boolean isUpgrade() {
-        return false;
-    }
-
-
-    @Override
-    protected Log getLog() {
+    protected final Log getLog() {
         return log;
     }
 
 
     @Override
-    public void pause() {
+    public final void pause() {
         // NO-OP. Handled by the Http2UpgradeHandler
     }
 
 
     @Override
-    public SocketState process(SocketWrapperBase<?> socket) throws IOException {
+    public final SocketState service(SocketWrapperBase<?> socket) throws IOException {
         try {
             adapter.service(request, response);
         } catch (Exception e) {
+            if (log.isDebugEnabled()) {
+                log.debug(sm.getString("streamProcessor.service.error"), e);
+            }
+            response.setStatus(500);
             setErrorState(ErrorState.CLOSE_NOW, e);
         }
 
-        if (getErrorState().isError()) {
+        if (sendfileState == SendfileState.PENDING) {
+            return SocketState.SENDFILE;
+        } else if (getErrorState().isError()) {
             action(ActionCode.CLOSE, null);
             request.updateCounters();
             return SocketState.CLOSED;
@@ -409,8 +360,12 @@ public class StreamProcessor extends AbstractProcessor implements Runnable {
 
 
     @Override
-    protected boolean flushBufferedWrite() throws IOException {
-        if (stream.getOutputBuffer().flush(false)) {
+    protected final boolean flushBufferedWrite() throws IOException {
+        if (log.isDebugEnabled()) {
+            log.debug(sm.getString("streamProcessor.flushBufferedWrite.entry",
+                    stream.getConnectionId(), stream.getIdentifier()));
+        }
+        if (stream.flush(false)) {
             // The buffer wasn't fully flushed so re-register the
             // stream for write. Note this does not go via the
             // Response since the write registration state at
@@ -418,7 +373,7 @@ public class StreamProcessor extends AbstractProcessor implements Runnable {
             // has been emptied then the code below will call
             // dispatch() which will enable the
             // Response to respond to this event.
-            if (stream.getOutputBuffer().isReady()) {
+            if (stream.isReady()) {
                 // Unexpected
                 throw new IllegalStateException();
             }
@@ -429,50 +384,7 @@ public class StreamProcessor extends AbstractProcessor implements Runnable {
 
 
     @Override
-    protected SocketState dispatchEndRequest() {
+    protected final SocketState dispatchEndRequest() {
         return SocketState.CLOSED;
-    }
-
-
-    public void addDispatch(DispatchType dispatchType) {
-        synchronized (dispatches) {
-            dispatches.add(dispatchType);
-        }
-    }
-    public Iterator<DispatchType> getIteratorAndClearDispatches() {
-        // Note: Logic in AbstractProtocol depends on this method only returning
-        // a non-null value if the iterator is non-empty. i.e. it should never
-        // return an empty iterator.
-        Iterator<DispatchType> result;
-        synchronized (dispatches) {
-            // Synchronized as the generation of the iterator and the clearing
-            // of dispatches needs to be an atomic operation.
-            result = dispatches.iterator();
-            if (result.hasNext()) {
-                dispatches.clear();
-            } else {
-                result = null;
-            }
-        }
-        return result;
-    }
-    public void clearDispatches() {
-        synchronized (dispatches) {
-            dispatches.clear();
-        }
-    }
-
-
-    @Override
-    public HttpUpgradeHandler getHttpUpgradeHandler() {
-        // Should never happen
-        throw new IllegalStateException(sm.getString("streamProcessor.httpupgrade.notsupported"));
-    }
-
-
-    @Override
-    public ByteBuffer getLeftoverInput() {
-        // Should never happen
-        throw new IllegalStateException(sm.getString("streamProcessor.httpupgrade.notsupported"));
     }
 }

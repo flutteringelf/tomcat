@@ -59,7 +59,7 @@ import org.apache.juli.logging.LogFactory;
  *
  * @version 1.0
  */
-public class TcpFailureDetector extends ChannelInterceptorBase {
+public class TcpFailureDetector extends ChannelInterceptorBase implements TcpFailureDetectorMBean {
 
     private static final Log log = LogFactory.getLog(TcpFailureDetector.class);
     protected static final StringManager sm = StringManager.getManager(TcpFailureDetector.class);
@@ -143,40 +143,49 @@ public class TcpFailureDetector extends ChannelInterceptorBase {
     @Override
     public void memberDisappeared(Member member) {
         if ( membership == null ) setupMembership();
-        boolean notify = false;
         boolean shutdown = Arrays.equals(member.getCommand(),Member.SHUTDOWN_PAYLOAD);
-        if ( !shutdown )
-            if(log.isInfoEnabled())
-                log.info(sm.getString("tcpFailureDetector.memberDisappeared.verify", member));
-        synchronized (membership) {
-            if (!membership.contains(member)) {
-                if(log.isInfoEnabled())
-                    log.info(sm.getString("tcpFailureDetector.already.disappeared", member));
-                return;
-            }
-            //check to see if the member really is gone
-            //if the payload is not a shutdown message
-            if (shutdown || !memberAlive(member)) {
-                //not correct, we need to maintain the map
+        if (shutdown) {
+            synchronized (membership) {
+                if (!membership.contains(member)) return;
                 membership.removeMember(member);
                 removeSuspects.remove(member);
                 if (member instanceof StaticMember) {
                     addSuspects.put(member, Long.valueOf(System.currentTimeMillis()));
                 }
-                notify = true;
-            } else {
-                //add the member as suspect
-                removeSuspects.put(member, Long.valueOf(System.currentTimeMillis()));
             }
-        }
-        if ( notify ) {
-            if(log.isInfoEnabled())
-                log.info(sm.getString("tcpFailureDetector.member.disappeared", member));
             super.memberDisappeared(member);
         } else {
+            boolean notify = false;
             if(log.isInfoEnabled())
-                log.info(sm.getString("tcpFailureDetector.still.alive", member));
-
+                log.info(sm.getString("tcpFailureDetector.memberDisappeared.verify", member));
+            synchronized (membership) {
+                if (!membership.contains(member)) {
+                    if(log.isInfoEnabled())
+                        log.info(sm.getString("tcpFailureDetector.already.disappeared", member));
+                    return;
+                }
+                //check to see if the member really is gone
+                if (!memberAlive(member)) {
+                    //not correct, we need to maintain the map
+                    membership.removeMember(member);
+                    removeSuspects.remove(member);
+                    if (member instanceof StaticMember) {
+                        addSuspects.put(member, Long.valueOf(System.currentTimeMillis()));
+                    }
+                    notify = true;
+                } else {
+                    //add the member as suspect
+                    removeSuspects.put(member, Long.valueOf(System.currentTimeMillis()));
+                }
+            }
+            if ( notify ) {
+                if(log.isInfoEnabled())
+                    log.info(sm.getString("tcpFailureDetector.member.disappeared", member));
+                super.memberDisappeared(member);
+            } else {
+                if(log.isInfoEnabled())
+                    log.info(sm.getString("tcpFailureDetector.still.alive", member));
+            }
         }
     }
 
@@ -209,6 +218,7 @@ public class TcpFailureDetector extends ChannelInterceptorBase {
         checkMembers(false);
     }
 
+    @Override
     public void checkMembers(boolean checkAll) {
         try {
             if (membership == null) setupMembership();
@@ -268,6 +278,9 @@ public class TcpFailureDetector extends ChannelInterceptorBase {
             Member m = keys[i];
             if (membership.getMember(m) != null && (!memberAlive(m))) {
                 membership.removeMember(m);
+                if (m instanceof StaticMember) {
+                    addSuspects.put(m, Long.valueOf(System.currentTimeMillis()));
+                }
                 super.memberDisappeared(m);
                 removeSuspects.remove(m);
                 if(log.isInfoEnabled())
@@ -309,7 +322,7 @@ public class TcpFailureDetector extends ChannelInterceptorBase {
         return memberAlive(mbr,TCP_FAIL_DETECT,performSendTest,performReadTest,readTestTimeout,connectTimeout,getOptionFlag());
     }
 
-    protected static boolean memberAlive(Member mbr, byte[] msgData,
+    protected boolean memberAlive(Member mbr, byte[] msgData,
                                          boolean sendTest, boolean readTest,
                                          long readTimeout, long conTimeout,
                                          int optionFlag) {
@@ -323,7 +336,7 @@ public class TcpFailureDetector extends ChannelInterceptorBase {
             socket.connect(addr, (int) conTimeout);
             if ( sendTest ) {
                 ChannelData data = new ChannelData(true);
-                data.setAddress(mbr);
+                data.setAddress(getLocalMember(false));
                 data.setMessage(new XByteBuffer(msgData,false));
                 data.setTimestamp(System.currentTimeMillis());
                 int options = optionFlag | Channel.SEND_OPTIONS_BYTE_MESSAGE;
@@ -343,47 +356,57 @@ public class TcpFailureDetector extends ChannelInterceptorBase {
         } catch (ConnectException cx) {
             //do nothing, we couldn't connect
         } catch (Exception x) {
-            log.error(sm.getString("tcpFailureDetector.failureDetection.failed"),x);
+            log.error(sm.getString("tcpFailureDetector.failureDetection.failed", mbr),x);
         }
         return false;
     }
 
+    @Override
     public long getReadTestTimeout() {
         return readTestTimeout;
     }
 
+    @Override
     public boolean getPerformSendTest() {
         return performSendTest;
     }
 
+    @Override
     public boolean getPerformReadTest() {
         return performReadTest;
     }
 
+    @Override
     public long getConnectTimeout() {
         return connectTimeout;
     }
 
+    @Override
     public int getRemoveSuspectsTimeout() {
         return removeSuspectsTimeout;
     }
 
+    @Override
     public void setPerformReadTest(boolean performReadTest) {
         this.performReadTest = performReadTest;
     }
 
+    @Override
     public void setPerformSendTest(boolean performSendTest) {
         this.performSendTest = performSendTest;
     }
 
+    @Override
     public void setReadTestTimeout(long readTestTimeout) {
         this.readTestTimeout = readTestTimeout;
     }
 
+    @Override
     public void setConnectTimeout(long connectTimeout) {
         this.connectTimeout = connectTimeout;
     }
 
+    @Override
     public void setRemoveSuspectsTimeout(int removeSuspectsTimeout) {
         this.removeSuspectsTimeout = removeSuspectsTimeout;
     }

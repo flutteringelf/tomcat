@@ -17,68 +17,104 @@
 package org.apache.tomcat.util.net.openssl;
 
 import java.util.List;
+import java.util.Set;
 
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.SSLSessionContext;
 import javax.net.ssl.TrustManager;
 
+import org.apache.juli.logging.Log;
+import org.apache.juli.logging.LogFactory;
+import org.apache.tomcat.jni.SSL;
 import org.apache.tomcat.util.net.SSLContext;
 import org.apache.tomcat.util.net.SSLHostConfig;
 import org.apache.tomcat.util.net.SSLHostConfigCertificate;
-import org.apache.tomcat.util.net.SSLUtil;
+import org.apache.tomcat.util.net.SSLUtilBase;
+import org.apache.tomcat.util.net.jsse.JSSEUtil;
 
-public class OpenSSLUtil implements SSLUtil {
+public class OpenSSLUtil extends SSLUtilBase {
 
-    private final SSLHostConfig sslHostConfig;
-    private final SSLHostConfigCertificate certificate;
+    private static final Log log = LogFactory.getLog(OpenSSLUtil.class);
 
-    private String[] enabledProtocols = null;
-    private String[] enabledCiphers = null;
+    private final JSSEUtil jsseUtil;
 
-    public OpenSSLUtil(SSLHostConfig sslHostConfig, SSLHostConfigCertificate certificate) {
-        this.sslHostConfig = sslHostConfig;
-        this.certificate = certificate;
+    public OpenSSLUtil(SSLHostConfigCertificate certificate) {
+        super(certificate);
+
+        if (certificate.getCertificateFile() == null) {
+            // Using JSSE configuration for keystore and truststore
+            // Missing protocols not a concern so don't warn on skip
+            jsseUtil = new JSSEUtil(certificate, false);
+        } else {
+            // Use OpenSSL configuration for certificates
+            jsseUtil = null;
+        }
     }
+
+
+    @Override
+    protected Log getLog() {
+        return log;
+    }
+
+
+    @Override
+    protected Set<String> getImplementedProtocols() {
+        return OpenSSLEngine.IMPLEMENTED_PROTOCOLS_SET;
+    }
+
+
+    @Override
+    protected Set<String> getImplementedCiphers() {
+        return OpenSSLEngine.AVAILABLE_CIPHER_SUITES;
+    }
+
+
+    @Override
+    protected boolean isTls13Available() {
+        return SSL.version() >= 0x1010100f;
+    }
+
+
+    @Override
+    protected boolean isTls13RenegAuthAvailable() {
+        // OpenSSL does support authentication after the initial handshake
+        return true;
+    }
+
 
     @Override
     public SSLContext createSSLContext(List<String> negotiableProtocols) throws Exception {
-        return new OpenSSLContext(sslHostConfig, certificate, negotiableProtocols);
+        return new OpenSSLContext(certificate, negotiableProtocols);
     }
 
     @Override
     public KeyManager[] getKeyManagers() throws Exception {
-        KeyManager[] managers = {
-                new OpenSSLKeyManager(SSLHostConfig.adjustRelativePath(certificate.getCertificateFile()),
-                        SSLHostConfig.adjustRelativePath(certificate.getCertificateKeyFile()))
-                };
-        return managers;
+        if (jsseUtil != null) {
+            return jsseUtil.getKeyManagers();
+        } else {
+            // Return something although it is not actually used
+            KeyManager[] managers = {
+                    new OpenSSLKeyManager(SSLHostConfig.adjustRelativePath(certificate.getCertificateFile()),
+                            SSLHostConfig.adjustRelativePath(certificate.getCertificateKeyFile()))
+            };
+            return managers;
+        }
     }
 
     @Override
     public TrustManager[] getTrustManagers() throws Exception {
-        return null;
+        if (jsseUtil != null) {
+            return jsseUtil.getTrustManagers();
+        } else {
+            return null;
+        }
     }
 
     @Override
     public void configureSessionContext(SSLSessionContext sslSessionContext) {
-        // do nothing. configuration is done in the init phase
-    }
-
-    @Override
-    public String[] getEnableableCiphers(SSLContext context) {
-        if (enabledCiphers == null) {
-            List<String> enabledCiphersList = ((OpenSSLContext) context).getCiphers();
-            enabledCiphers = enabledCiphersList.toArray(new String[enabledCiphersList.size()]);
+        if (jsseUtil != null) {
+            jsseUtil.configureSessionContext(sslSessionContext);
         }
-        return enabledCiphers;
     }
-
-    @Override
-    public String[] getEnableableProtocols(SSLContext context) {
-        if (enabledProtocols == null) {
-            enabledProtocols = new OpenSSLProtocols(((OpenSSLContext) context).getEnabledProtocol()).getProtocols();
-        }
-        return enabledProtocols;
-    }
-
 }

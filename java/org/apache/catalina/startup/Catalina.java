@@ -28,6 +28,7 @@ import java.net.Socket;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.logging.LogManager;
 
 import org.apache.catalina.Container;
@@ -121,10 +122,17 @@ public class Catalina {
     protected boolean useNaming = true;
 
 
+    /**
+     * Prevent duplicate loads.
+     */
+    protected boolean loaded = false;
+
+
     // ----------------------------------------------------------- Constructors
 
     public Catalina() {
         setSecurityProtection();
+        ExceptionUtils.preload();
     }
 
 
@@ -161,7 +169,7 @@ public class Catalina {
 
     public ClassLoader getParentClassLoader() {
         if (parentClassLoader != null) {
-            return (parentClassLoader);
+            return parentClassLoader;
         }
         return ClassLoader.getSystemClassLoader();
     }
@@ -177,10 +185,10 @@ public class Catalina {
 
 
     /**
-     * Return true if naming is enabled.
+     * @return <code>true</code> if naming is enabled.
      */
     public boolean isUseNaming() {
-        return (this.useNaming);
+        return this.useNaming;
     }
 
 
@@ -205,11 +213,10 @@ public class Catalina {
 
 
     /**
-     * Process the specified command line arguments, and return
-     * <code>true</code> if we should continue processing; otherwise
-     * return <code>false</code>.
+     * Process the specified command line arguments.
      *
      * @param args Command line arguments to process
+     * @return <code>true</code> if we should continue processing
      */
     protected boolean arguments(String args[]) {
 
@@ -249,6 +256,7 @@ public class Catalina {
 
     /**
      * Return a File object representing our configuration file.
+     * @return the main configuration file
      */
     protected File configFile() {
 
@@ -256,13 +264,14 @@ public class Catalina {
         if (!file.isAbsolute()) {
             file = new File(Bootstrap.getCatalinaBase(), configFile);
         }
-        return (file);
+        return file;
 
     }
 
 
     /**
      * Create and configure the Digester we will be using for startup.
+     * @return the main digester to parse server.xml
      */
     protected Digester createStartDigester() {
         long t1=System.currentTimeMillis();
@@ -270,8 +279,8 @@ public class Catalina {
         Digester digester = new Digester();
         digester.setValidating(false);
         digester.setRulesValidation(true);
-        HashMap<Class<?>, List<String>> fakeAttributes = new HashMap<>();
-        ArrayList<String> attrs = new ArrayList<>();
+        Map<Class<?>, List<String>> fakeAttributes = new HashMap<>();
+        List<String> attrs = new ArrayList<>();
         attrs.add("className");
         fakeAttributes.put(Object.class, attrs);
         digester.setFakeAttributes(fakeAttributes);
@@ -330,8 +339,8 @@ public class Catalina {
 
         digester.addRule("Server/Service/Connector",
                          new ConnectorCreateRule());
-        digester.addRule("Server/Service/Connector",
-                         new SetAllPropertiesRule(new String[]{"executor", "sslImplementationName"}));
+        digester.addRule("Server/Service/Connector", new SetAllPropertiesRule(
+                new String[]{"executor", "sslImplementationName", "protocol"}));
         digester.addSetNext("Server/Service/Connector",
                             "addConnector",
                             "org.apache.catalina.connector.Connector");
@@ -351,6 +360,20 @@ public class Catalina {
                             "addCertificate",
                             "org.apache.tomcat.util.net.SSLHostConfigCertificate");
 
+        digester.addObjectCreate("Server/Service/Connector/SSLHostConfig/OpenSSLConf",
+                                 "org.apache.tomcat.util.net.openssl.OpenSSLConf");
+        digester.addSetProperties("Server/Service/Connector/SSLHostConfig/OpenSSLConf");
+        digester.addSetNext("Server/Service/Connector/SSLHostConfig/OpenSSLConf",
+                            "setOpenSslConf",
+                            "org.apache.tomcat.util.net.openssl.OpenSSLConf");
+
+        digester.addObjectCreate("Server/Service/Connector/SSLHostConfig/OpenSSLConf/OpenSSLConfCmd",
+                                 "org.apache.tomcat.util.net.openssl.OpenSSLConfCmd");
+        digester.addSetProperties("Server/Service/Connector/SSLHostConfig/OpenSSLConf/OpenSSLConfCmd");
+        digester.addSetNext("Server/Service/Connector/SSLHostConfig/OpenSSLConf/OpenSSLConfCmd",
+                            "addCmd",
+                            "org.apache.tomcat.util.net.openssl.OpenSSLConfCmd");
+
         digester.addObjectCreate("Server/Service/Connector/Listener",
                                  null, // MUST be specified in the element
                                  "className");
@@ -367,7 +390,7 @@ public class Catalina {
                             "addUpgradeProtocol",
                             "org.apache.coyote.UpgradeProtocol");
 
-// Add RuleSets for nested elements
+        // Add RuleSets for nested elements
         digester.addRuleSet(new NamingRuleSet("Server/GlobalNamingResources/"));
         digester.addRuleSet(new EngineRuleSet("Server/Service/"));
         digester.addRuleSet(new HostRuleSet("Server/Service/Engine/"));
@@ -384,7 +407,7 @@ public class Catalina {
         if (log.isDebugEnabled()) {
             log.debug("Digester for server.xml created " + ( t2-t1 ));
         }
-        return (digester);
+        return digester;
 
     }
 
@@ -412,6 +435,7 @@ public class Catalina {
 
     /**
      * Create and configure the Digester we will be using for shutdown.
+     * @return the digester to process the stop operation
      */
     protected Digester createStopDigester() {
 
@@ -428,7 +452,7 @@ public class Catalina {
                             "setServer",
                             "org.apache.catalina.Server");
 
-        return (digester);
+        return digester;
 
     }
 
@@ -500,6 +524,11 @@ public class Catalina {
      */
     public void load() {
 
+        if (loaded) {
+            return;
+        }
+        loaded = true;
+
         long t1 = System.nanoTime();
 
         initDirs();
@@ -514,77 +543,81 @@ public class Catalina {
         InputStream inputStream = null;
         File file = null;
         try {
-            file = configFile();
-            inputStream = new FileInputStream(file);
-            inputSource = new InputSource(file.toURI().toURL().toString());
-        } catch (Exception e) {
-            if (log.isDebugEnabled()) {
-                log.debug(sm.getString("catalina.configFail", file), e);
-            }
-        }
-        if (inputStream == null) {
             try {
-                inputStream = getClass().getClassLoader()
-                    .getResourceAsStream(getConfigFile());
-                inputSource = new InputSource
+                file = configFile();
+                inputStream = new FileInputStream(file);
+                inputSource = new InputSource(file.toURI().toURL().toString());
+            } catch (Exception e) {
+                if (log.isDebugEnabled()) {
+                    log.debug(sm.getString("catalina.configFail", file), e);
+                }
+            }
+            if (inputStream == null) {
+                try {
+                    inputStream = getClass().getClassLoader()
+                        .getResourceAsStream(getConfigFile());
+                    inputSource = new InputSource
+                        (getClass().getClassLoader()
+                         .getResource(getConfigFile()).toString());
+                } catch (Exception e) {
+                    if (log.isDebugEnabled()) {
+                        log.debug(sm.getString("catalina.configFail",
+                                getConfigFile()), e);
+                    }
+                }
+            }
+
+            // This should be included in catalina.jar
+            // Alternative: don't bother with xml, just create it manually.
+            if (inputStream == null) {
+                try {
+                    inputStream = getClass().getClassLoader()
+                            .getResourceAsStream("server-embed.xml");
+                    inputSource = new InputSource
                     (getClass().getClassLoader()
-                     .getResource(getConfigFile()).toString());
-            } catch (Exception e) {
-                if (log.isDebugEnabled()) {
-                    log.debug(sm.getString("catalina.configFail",
-                            getConfigFile()), e);
+                            .getResource("server-embed.xml").toString());
+                } catch (Exception e) {
+                    if (log.isDebugEnabled()) {
+                        log.debug(sm.getString("catalina.configFail",
+                                "server-embed.xml"), e);
+                    }
                 }
             }
-        }
 
-        // This should be included in catalina.jar
-        // Alternative: don't bother with xml, just create it manually.
-        if (inputStream == null) {
+
+            if (inputStream == null || inputSource == null) {
+                if  (file == null) {
+                    log.warn(sm.getString("catalina.configFail",
+                            getConfigFile() + "] or [server-embed.xml]"));
+                } else {
+                    log.warn(sm.getString("catalina.configFail",
+                            file.getAbsolutePath()));
+                    if (file.exists() && !file.canRead()) {
+                        log.warn("Permissions incorrect, read permission is not allowed on the file.");
+                    }
+                }
+                return;
+            }
+
             try {
-                inputStream = getClass().getClassLoader()
-                        .getResourceAsStream("server-embed.xml");
-                inputSource = new InputSource
-                (getClass().getClassLoader()
-                        .getResource("server-embed.xml").toString());
+                inputSource.setByteStream(inputStream);
+                digester.push(this);
+                digester.parse(inputSource);
+            } catch (SAXParseException spe) {
+                log.warn("Catalina.start using " + getConfigFile() + ": " +
+                        spe.getMessage());
+                return;
             } catch (Exception e) {
-                if (log.isDebugEnabled()) {
-                    log.debug(sm.getString("catalina.configFail",
-                            "server-embed.xml"), e);
-                }
+                log.warn("Catalina.start using " + getConfigFile() + ": " , e);
+                return;
             }
-        }
-
-
-        if (inputStream == null || inputSource == null) {
-            if  (file == null) {
-                log.warn(sm.getString("catalina.configFail",
-                        getConfigFile() + "] or [server-embed.xml]"));
-            } else {
-                log.warn(sm.getString("catalina.configFail",
-                        file.getAbsolutePath()));
-                if (file.exists() && !file.canRead()) {
-                    log.warn("Permissions incorrect, read permission is not allowed on the file.");
-                }
-            }
-            return;
-        }
-
-        try {
-            inputSource.setByteStream(inputStream);
-            digester.push(this);
-            digester.parse(inputSource);
-        } catch (SAXParseException spe) {
-            log.warn("Catalina.start using " + getConfigFile() + ": " +
-                    spe.getMessage());
-            return;
-        } catch (Exception e) {
-            log.warn("Catalina.start using " + getConfigFile() + ": " , e);
-            return;
         } finally {
-            try {
-                inputStream.close();
-            } catch (IOException e) {
-                // Ignore
+            if (inputStream != null) {
+                try {
+                    inputStream.close();
+                } catch (IOException e) {
+                    // Ignore
+                }
             }
         }
 

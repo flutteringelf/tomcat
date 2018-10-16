@@ -24,10 +24,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.logging.LogManager;
 
-import static org.junit.Assert.fail;
-
 import org.junit.After;
 import org.junit.AfterClass;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Rule;
@@ -51,6 +50,8 @@ import org.apache.juli.logging.LogFactory;
  * even if the tests do not use Tomcat.
  */
 public abstract class LoggingBaseTest {
+
+    private static List<File> deleteOnClassTearDown = new ArrayList<>();
 
     protected Log log;
 
@@ -117,7 +118,7 @@ public abstract class LoggingBaseTest {
         // Create catalina.base directory
         File tempBase = new File(System.getProperty("tomcat.test.temp", "output/tmp"));
         if (!tempBase.mkdirs() && !tempBase.isDirectory()) {
-            fail("Unable to create base temporary directory for tests");
+            Assert.fail("Unable to create base temporary directory for tests");
         }
         Path tempBasePath = FileSystems.getDefault().getPath(tempBase.getAbsolutePath());
         tempDir = Files.createTempDirectory(tempBasePath, "test").toFile();
@@ -135,7 +136,8 @@ public abstract class LoggingBaseTest {
         }
         deleteOnTearDown.clear();
 
-        ExpandWar.deleteDir(tempDir);
+        // tempDir contains log files which will be open until JULI shuts down
+        deleteOnClassTearDown.add(tempDir);
     }
 
     @AfterClass
@@ -146,5 +148,9 @@ public abstract class LoggingBaseTest {
         } else {
             logManager.reset();
         }
+        for (File file : deleteOnClassTearDown) {
+            ExpandWar.delete(file);
+        }
+        deleteOnClassTearDown.clear();
     }
 }
